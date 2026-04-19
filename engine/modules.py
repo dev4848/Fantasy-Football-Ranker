@@ -15,22 +15,22 @@ from engine.schema import ModuleScore
 
 SCORING_PRESETS = {
     "standard": {
-        "pass_yards_per_point": 25, "pass_td": 4, "pass_int": -2,
-        "rush_yards_per_point": 10, "rush_td": 6,
-        "reception": 0, "recv_yards_per_point": 10, "recv_td": 6,
-        "fumble_lost": -2, "return_td": 6,
+        "pass_yards_per_point": 25, "pass_td": 4, "pass_int": -2, "pass_2pt": 2,
+        "rush_yards_per_point": 10, "rush_td": 6, "rush_2pt": 2,
+        "reception": 0, "recv_yards_per_point": 10, "recv_td": 6, "recv_2pt": 2,
+        "fumble_lost": -2, "fumble_recovery_td": 6,
     },
     "half_ppr": {
-        "pass_yards_per_point": 25, "pass_td": 4, "pass_int": -2,
-        "rush_yards_per_point": 10, "rush_td": 6,
-        "reception": 0.5, "recv_yards_per_point": 10, "recv_td": 6,
-        "fumble_lost": -2, "return_td": 6,
+        "pass_yards_per_point": 25, "pass_td": 4, "pass_int": -2, "pass_2pt": 2,
+        "rush_yards_per_point": 10, "rush_td": 6, "rush_2pt": 2,
+        "reception": 0.5, "recv_yards_per_point": 10, "recv_td": 6, "recv_2pt": 2,
+        "fumble_lost": -2, "fumble_recovery_td": 6,
     },
     "ppr": {
-        "pass_yards_per_point": 25, "pass_td": 4, "pass_int": -2,
-        "rush_yards_per_point": 10, "rush_td": 6,
-        "reception": 1.0, "recv_yards_per_point": 10, "recv_td": 6,
-        "fumble_lost": -2, "return_td": 6,
+        "pass_yards_per_point": 25, "pass_td": 4, "pass_int": -2, "pass_2pt": 2,
+        "rush_yards_per_point": 10, "rush_td": 6, "rush_2pt": 2,
+        "reception": 1.0, "recv_yards_per_point": 10, "recv_td": 6, "recv_2pt": 2,
+        "fumble_lost": -2, "fumble_recovery_td": 6,
     },
 }
 
@@ -55,21 +55,21 @@ def calc_season_fantasy_points(stats: dict, rules: dict) -> float:
     # Passing
     pts += (stats.get("pass_yards") or 0) / rules.get("pass_yards_per_point", 25)
     pts += (stats.get("pass_tds") or 0) * rules.get("pass_td", 4)
-    pts += (stats.get("interceptions") or 0) * rules.get("pass_int", -2)
+    pts += (stats.get("interceptions") or 0) * rules.get("pass_int", -1)  # league uses -1
 
     # Rushing
     pts += (stats.get("rush_yards") or 0) / rules.get("rush_yards_per_point", 10)
     pts += (stats.get("rush_tds") or 0) * rules.get("rush_td", 6)
 
-    # Receiving
-    pts += (stats.get("receptions") or 0) * rules.get("reception", 0.5)
+    # Receiving — full PPR
+    pts += (stats.get("receptions") or 0) * rules.get("reception", 1.0)
     pts += (stats.get("recv_yards") or 0) / rules.get("recv_yards_per_point", 10)
     pts += (stats.get("recv_tds") or 0) * rules.get("recv_td", 6)
 
-    # Misc
-    fumbles = (stats.get("rush_fumbles_lost") or 0) + (stats.get("recv_fumbles_lost") or 0)
-    pts += fumbles * rules.get("fumble_lost", -2)
-    pts += (stats.get("return_tds") or 0) * rules.get("return_td", 6)
+    # Fumbles
+    pts += (stats.get("rush_fumbles_lost") or 0) * rules.get("fumble_lost", -2)
+    pts += (stats.get("recv_fumbles_lost") or 0) * rules.get("fumble_lost", -2)
+    pts += (stats.get("fumble_recovery_tds") or 0) * rules.get("fumble_recovery_td", 6)
 
     return pts
 

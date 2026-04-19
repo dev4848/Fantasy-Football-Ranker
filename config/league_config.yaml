@@ -14,7 +14,7 @@ league:
     FLEX: 1          # RB/WR/TE eligible
     K: 1
     DST: 1
-    BN: 6            # bench spots
+    BN: 5            # bench spots
   playoff_teams: 4
   playoff_weeks: [15, 16, 17]
 
@@ -25,32 +25,67 @@ league:
 #                 "yahoo_default", "espn_default", "sleeper_default"
 # ------------------------------------------------------------
 scoring:
-  preset: "half_ppr"   # leave blank to use custom block below
+  preset: ""           # using custom block — do not set a preset name
 
   custom:
-    # Passing
-    pass_yards_per_point: 25       # 1 pt per 25 pass yards
+    # --- Passing ---
+    pass_yards_per_point: 25       # 0.04 pts/yard = 1 pt per 25 yards
     pass_td: 4
-    pass_int: -2
     pass_2pt: 2
-    pass_40_yard_bonus: 0          # bonus pts for 40+ yard TD pass
+    pass_int: -1                   # ★ non-standard: -1 (not the typical -2)
 
-    # Rushing
-    rush_yards_per_point: 10       # 1 pt per 10 rush yards
+    # --- Rushing ---
+    rush_yards_per_point: 10       # 0.1 pts/yard = 1 pt per 10 yards
     rush_td: 6
     rush_2pt: 2
-    rush_40_yard_bonus: 0
 
-    # Receiving
-    reception: 0.5                 # 0 = standard, 0.5 = half PPR, 1 = PPR
-    recv_yards_per_point: 10
+    # --- Receiving ---
+    reception: 1.0                 # ★ full PPR
+    recv_yards_per_point: 10       # 0.1 pts/yard = 1 pt per 10 yards
     recv_td: 6
     recv_2pt: 2
-    recv_40_yard_bonus: 0
 
-    # Miscellaneous
+    # --- Miscellaneous (offensive) ---
     fumble_lost: -2
-    return_td: 6
+    fumble_recovery_td: 6
+
+    # --- Kicking ---
+    # Ranked separately — not included in skill position composite
+    fg_0_19: 3
+    fg_20_29: 3
+    fg_30_39: 3
+    fg_40_49: 4                    # ★ non-standard distance tiers
+    fg_50_59: 5
+    fg_60_plus: 6
+    pat_made: 1
+    fg_missed: -1
+    fg_missed_30_39: -1
+    fg_missed_40_49: -1
+    pat_missed: -1
+
+    # --- Team Defense / ST ---
+    # Ranked separately — not included in skill position composite
+    dst_td: 6
+    dst_points_allowed_0: 10
+    dst_points_allowed_1_6: 7
+    dst_points_allowed_7_13: 4
+    dst_points_allowed_14_20: 1
+    dst_points_allowed_28_34: -1
+    dst_points_allowed_35_plus: -4
+    dst_sack: 1
+    dst_int: 2
+    dst_fumble_recovery: 2
+    dst_safety: 2
+    dst_forced_fumble: 1
+    dst_blocked_kick: 2
+
+    # --- Special Teams ---
+    st_td: 6
+    st_forced_fumble: 1
+    st_fumble_recovery: 1
+    st_player_td: 6
+    st_player_forced_fumble: 1
+    st_player_fumble_recovery: 1
 
 # ------------------------------------------------------------
 # Historical data window
@@ -157,7 +192,8 @@ context:
 # ------------------------------------------------------------
 positions:
   include: [QB, RB, WR, TE]
-  # K and DST are excluded by default — add if your league values them
+  # K and DST scoring is tracked in config but ranked separately.
+  # Set to [K, DST] to include them in the composite board in a future version.
   exclude: [K, DST]
 
 # ------------------------------------------------------------
