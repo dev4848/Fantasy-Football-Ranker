@@ -1,0 +1,170 @@
+# ============================================================
+# league_config.yaml
+# Edit this file to match your league before running.
+# ============================================================
+
+league:
+  name: "My League"
+  teams: 12
+  roster_spots:
+    QB: 1
+    RB: 2
+    WR: 2
+    TE: 1
+    FLEX: 1          # RB/WR/TE eligible
+    K: 1
+    DST: 1
+    BN: 6            # bench spots
+  playoff_teams: 4
+  playoff_weeks: [15, 16, 17]
+
+# ------------------------------------------------------------
+# Scoring format
+# Set a preset name OR manually fill the custom block below.
+# Preset options: "standard", "half_ppr", "ppr", "draftkings",
+#                 "yahoo_default", "espn_default", "sleeper_default"
+# ------------------------------------------------------------
+scoring:
+  preset: "half_ppr"   # leave blank to use custom block below
+
+  custom:
+    # Passing
+    pass_yards_per_point: 25       # 1 pt per 25 pass yards
+    pass_td: 4
+    pass_int: -2
+    pass_2pt: 2
+    pass_40_yard_bonus: 0          # bonus pts for 40+ yard TD pass
+
+    # Rushing
+    rush_yards_per_point: 10       # 1 pt per 10 rush yards
+    rush_td: 6
+    rush_2pt: 2
+    rush_40_yard_bonus: 0
+
+    # Receiving
+    reception: 0.5                 # 0 = standard, 0.5 = half PPR, 1 = PPR
+    recv_yards_per_point: 10
+    recv_td: 6
+    recv_2pt: 2
+    recv_40_yard_bonus: 0
+
+    # Miscellaneous
+    fumble_lost: -2
+    return_td: 6
+
+# ------------------------------------------------------------
+# Historical data window
+# ------------------------------------------------------------
+history:
+  lookback_years: 4          # how many seasons to analyze (max 5)
+  # Recency weights — must have 'lookback_years' entries.
+  # First entry = most recent season. Will be auto-normalized.
+  recency_weights: [1.0, 0.70, 0.45, 0.25]
+
+  # Minimum games played for a season to receive full weight.
+  # Seasons below this threshold get a games-played discount:
+  #   effective_weight = season_weight * (games_played / min_games_threshold)
+  # The season is NOT excluded — it is proportionally dampened.
+  min_games_threshold: 12
+
+  # Seasons where a player appeared in fewer than this many games
+  # are still included but receive near-zero weight.
+  hard_exclude_below_games: 2
+
+# ------------------------------------------------------------
+# Module weights
+# Controls how much each scoring module contributes to the
+# final composite score. Values are relative — they are
+# auto-normalized to sum to 1.0.
+# Increase a weight to make that factor matter more.
+# ------------------------------------------------------------
+module_weights:
+  fantasy_points:   0.35    # raw historical production (core signal)
+  trend:            0.20    # trajectory — rising vs declining
+  injury_risk:      0.15    # games missed history + aggression index
+  schedule:         0.10    # strength of schedule in upcoming season
+  context:          0.10    # O-line grade, team win proj, QB situation
+  consistency:      0.10    # reliability — floor/ceiling spread
+
+# ------------------------------------------------------------
+# Injury risk module settings
+# ------------------------------------------------------------
+injury_risk:
+  # Weight of the aggression index within the injury risk module
+  aggression_weight: 0.35
+
+  # Aggression index components (must sum to 1.0)
+  aggression_components:
+    contact_rate: 0.40          # % of touches involving pre-catch contact
+    broken_tackle_attempts: 0.35  # broken tackle attempts per touch
+    yards_after_contact: 0.25   # inverse: low YAC = absorbing punishment
+
+  # Penalty tiers for career injury frequency
+  # (games missed per season, averaged over career)
+  injury_frequency_tiers:
+    low:    { max_games_missed: 2,  multiplier: 1.00 }
+    medium: { max_games_missed: 5,  multiplier: 0.90 }
+    high:   { max_games_missed: 9,  multiplier: 0.78 }
+    severe: { max_games_missed: 99, multiplier: 0.62 }
+
+# ------------------------------------------------------------
+# Trend / trajectory module settings
+# ------------------------------------------------------------
+trend:
+  # Standard deviations above career mean for "rising" flag
+  rising_threshold_stdev: 1.0
+
+  # Coefficient of variation (std/mean) cutoff for boom-bust flag
+  boom_bust_cv_threshold: 0.45
+
+  # TD regression flag: seasons where TD rate is this many stdevs
+  # above career rate get flagged with td_regression_risk (soft warning)
+  td_regression_stdev_threshold: 1.5
+
+# ------------------------------------------------------------
+# Schedule module settings
+# ------------------------------------------------------------
+schedule:
+  # Stat used to measure opponent difficulty per position:
+  # "points_allowed_vs_position" = fantasy pts opposing position
+  # scored against that defense, averaged over last 2 seasons
+  opponent_metric: "points_allowed_vs_position"
+
+  # Weeks to evaluate for schedule difficulty
+  # (typically exclude bye week and playoff weeks)
+  evaluate_weeks: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+
+# ------------------------------------------------------------
+# Context module settings
+# ------------------------------------------------------------
+context:
+  # O-line grades sourced from PFF (or fallback: adjusted line yards)
+  oline_grade_source: "pff"        # options: "pff", "adjusted_line_yards"
+
+  # QB change penalty — applied to WR/TE on teams with new starting QB
+  # who has < 1 year of NFL starts
+  qb_change_penalty: -0.08         # -8% composite score modifier
+
+  # Team win projection source
+  team_projection_source: "vegas"  # options: "vegas", "fivethirtyeight"
+
+  # Penalty for players on teams projected to win fewer than N games
+  bad_team_threshold_wins: 5
+  bad_team_penalty: -0.06
+
+# ------------------------------------------------------------
+# Positions to rank
+# ------------------------------------------------------------
+positions:
+  include: [QB, RB, WR, TE]
+  # K and DST are excluded by default — add if your league values them
+  exclude: [K, DST]
+
+# ------------------------------------------------------------
+# Minimum data requirements
+# A player must meet these thresholds to appear in rankings.
+# Players below threshold are excluded with a note.
+# ------------------------------------------------------------
+eligibility:
+  min_seasons_with_data: 1     # rookies excluded until v2
+  min_career_games: 8          # must have played at least 8 career games
