@@ -102,7 +102,9 @@ def score_fantasy_points(
     for i, season in enumerate(seasons):
         gp = max(season.get("games_played", 0), 1)
         games_factor = min(gp / min_games, 1.0)
-        base_weight = recency_weights[i] if i < len(recency_weights) else 0.1
+        n = len(seasons)
+        rw_idx = n - 1 - i   # align: newest season (i=n-1) → recency_weights[0]
+        base_weight = recency_weights[rw_idx] if rw_idx < len(recency_weights) else 0.1
         eff_w = base_weight * games_factor
 
         total_pts = calc_season_fantasy_points(season, rules)
@@ -120,6 +122,8 @@ def score_fantasy_points(
         if total_w > 0 else 0.0
     )
 
+    flags: list[str] = []
+
     reasoning = [
         f"Weighted avg: {wmean:.1f} fantasy pts/game over {len(seasons)} season(s).",
         "Season breakdown: " + " | ".join(season_summaries),
@@ -129,7 +133,7 @@ def score_fantasy_points(
         player_id=player_id, season_evaluated=upcoming_season,
         module_name="fantasy_points", raw_score=wmean, normalized_score=0.0,
         weight_applied=0.0, weighted_contribution=0.0,
-        flags=[], reasoning=reasoning,
+        flags=flags, reasoning=reasoning,
     )
 
 
@@ -157,7 +161,8 @@ def score_consistency(
     flags: list[str] = []
     reasoning: list[str] = []
 
-    if len(per_game_scores) < 4:
+    # Minimum 8 individual games for meaningful consistency scoring
+    if len(per_game_scores) < 8:
         return ModuleScore(
             player_id=player_id, season_evaluated=upcoming_season,
             module_name="consistency", raw_score=0.5, normalized_score=0.0,
@@ -180,7 +185,10 @@ def score_consistency(
     # CV of 0 → 1.0, CV of 1.0 → 0.5, CV of 2.0+ → ~0.33
     raw_score = 1.0 / (1.0 + cv)
 
-    if cv >= 0.45:
+    # Threshold recalibrated for game-level data (not season averages).
+    # Individual games naturally vary more than season means — a CV of 0.65+
+    # across 60+ games indicates genuinely unreliable weekly output.
+    if cv >= 0.65:
         flags.append("boom_bust")
 
     reasoning.append(
@@ -215,18 +223,39 @@ O-line quality, team win projection, QB situation.
 def score_context(
     player_id: str,
     position: str,
-    team_context: dict,         # TeamContext as dict for upcoming season
+    team_context: dict,
     config: dict,
     upcoming_season: int,
+    player_age: int | None = None,
+    recent_target_share: float | None = None,
+    recent_snap_pct: float | None = None,
+    snap_pct_delta: float | None = None,
+    avg_games_per_season: float | None = None,
+    num_seasons: int = 0,
+    recent_air_yards_share: float | None = None,
+    recent_touch_share: float | None = None,
+    recent_ypc: float | None = None,
+    recent_ypt: float | None = None,
 ) -> ModuleScore:
     """
-    Combines O-line grade, team win projection, and QB situation
-    into a single context modifier (0.0–1.0 scale).
+    Combines O-line grade, team win projection, QB situation, player age,
+    target share, snap participation, and offensive dominance signals into a
+    single context modifier (0.0–1.0 scale).
+
+    Dominance signals added to improve top-6 accuracy:
+      - Air yards market share (WR): differentiates WR1 from WR2
+      - Touch share (RB): workhorse vs committee usage
+      - YPC efficiency (RB): yards per carry
+      - Y/TGT efficiency (WR/TE): yards per target
     """
     ctx_cfg = config.get("context", {})
+    age_cfg = config.get("age_curve", {})
+    ts_cfg  = config.get("target_share", {})
+    dom_cfg = config.get("dominance_signals", {})
     flags: list[str] = []
     reasoning: list[str] = []
     components: list[float] = []
+    multiplier = 1.0  # all penalties/bonuses accumulate here; applied to base at end
 
     # --- O-line ---
     if position in ("RB",):
@@ -235,13 +264,12 @@ def score_context(
         grade = team_context.get("oline_pass_block_grade") or team_context.get("oline_pff_grade")
 
     if grade is not None:
-        # PFF grades 0–100; normalize to 0–1
         oline_norm = grade / 100.0
         components.append(oline_norm)
         label = "elite" if grade >= 75 else "solid" if grade >= 60 else "average" if grade >= 50 else "poor"
         reasoning.append(f"O-line grade: {grade:.0f}/100 ({label}) for {position} play.")
     else:
-        components.append(0.5)   # neutral if unavailable
+        components.append(0.5)
 
     # --- Team win projection ---
     proj_wins = team_context.get("projected_wins")
@@ -279,9 +307,192 @@ def score_context(
                 "some adjustment period expected."
             )
         else:
-            components.append(0.70)   # incumbent QB = stable baseline
+            components.append(0.70)
 
-    raw_score = sum(components) / len(components) if components else 0.5
+    # --- Base score from structural components ---
+    base_score = sum(components) / len(components) if components else 0.5
+
+    # --- Age-based decline multiplier ---
+    if player_age is not None:
+        age_penalty = 0.0
+        if position == "RB":
+            mild     = age_cfg.get("rb_mild_age", 28)
+            moderate = age_cfg.get("rb_moderate_age", 30)
+            heavy    = moderate + 2
+        elif position in ("WR", "TE"):
+            mild     = age_cfg.get("wr_mild_age", 30)
+            moderate = age_cfg.get("wr_moderate_age", 32)
+            heavy    = moderate + 2
+        elif position == "QB":
+            mild     = age_cfg.get("qb_mild_age", 36)
+            moderate = age_cfg.get("qb_moderate_age", 39)
+            heavy    = moderate + 2
+        else:
+            mild = moderate = heavy = 99
+
+        mild_p     = age_cfg.get("mild_penalty",     0.08)
+        moderate_p = age_cfg.get("moderate_penalty", 0.18)
+        heavy_p    = age_cfg.get("heavy_penalty",    0.30)
+
+        if player_age >= heavy:
+            age_penalty = heavy_p
+            flags.append("age_decline")
+            reasoning.append(
+                f"Age {player_age} — significant decline risk for {position} at this stage of career."
+            )
+        elif player_age >= moderate:
+            age_penalty = moderate_p
+            flags.append("age_decline")
+            reasoning.append(
+                f"Age {player_age} — entering prime decline window for {position}; production may dip."
+            )
+        elif player_age >= mild:
+            age_penalty = mild_p
+            reasoning.append(
+                f"Age {player_age} — approaching typical {position} decline age; mild projection discount."
+            )
+
+        if age_penalty > 0:
+            multiplier *= (1.0 - age_penalty)
+
+    # --- Recent target share floor (WR / TE only) ---
+    if position in ("WR", "TE") and recent_target_share is not None:
+        if position == "WR":
+            floor = ts_cfg.get("wr_meaningful_share", 0.12)
+        else:
+            floor = ts_cfg.get("te_meaningful_share", 0.10)
+        ts_penalty_max = ts_cfg.get("low_share_penalty", 0.20)
+
+        if recent_target_share < floor:
+            severity = 1.0 - (recent_target_share / floor)
+            ts_penalty = ts_penalty_max * severity
+            flags.append("low_target_share")
+            reasoning.append(
+                f"Target share last season: {recent_target_share:.1%} — "
+                f"below the {floor:.0%} meaningful-role threshold; role may have diminished."
+            )
+            multiplier *= (1.0 - ts_penalty)
+
+    # --- Snap participation (WR only) ---
+    if position == "WR" and recent_snap_pct is not None:
+        snap_cfg = config.get("snap_participation", {})
+        starter_threshold = snap_cfg.get("wr_starter_snap_pct", 0.75)
+        backup_threshold  = snap_cfg.get("wr_backup_snap_pct", 0.50)
+        expanding_delta   = snap_cfg.get("role_expanding_delta", 0.08)
+        starter_bonus     = snap_cfg.get("starter_bonus", 0.08)
+        backup_penalty    = snap_cfg.get("backup_penalty", 0.12)
+
+        if recent_snap_pct >= starter_threshold:
+            multiplier *= (1.0 + starter_bonus)
+            if snap_pct_delta is not None and snap_pct_delta >= expanding_delta:
+                flags.append("role_expanding")
+                reasoning.append(
+                    f"Snap share {recent_snap_pct:.0%} and rising (+{snap_pct_delta:.0%} YoY) "
+                    "— expanding role in the offense."
+                )
+            else:
+                reasoning.append(
+                    f"High snap share ({recent_snap_pct:.0%}) confirms starter-level role."
+                )
+        elif snap_pct_delta is not None and snap_pct_delta >= expanding_delta:
+            flags.append("role_expanding")
+            multiplier *= (1.0 + starter_bonus * 0.5)
+            reasoning.append(
+                f"Snap share rising ({snap_pct_delta:+.0%} YoY to {recent_snap_pct:.0%}) "
+                "— role expanding, watch for continued growth."
+            )
+        elif recent_snap_pct < backup_threshold:
+            multiplier *= (1.0 - backup_penalty)
+            flags.append("limited_role")
+            reasoning.append(
+                f"Limited snap share ({recent_snap_pct:.0%}) — role in offense is restricted."
+            )
+
+    # --- Air yards market share (WR) ---
+    # Differentiates true WR1s from volume WR2s; top-6 WRs typically own 25%+ AYMS.
+    if position == "WR" and recent_air_yards_share is not None:
+        ayms_elite = dom_cfg.get("wr_ayms_elite", 0.25)
+        ayms_solid = dom_cfg.get("wr_ayms_solid", 0.18)
+        ayms_low   = dom_cfg.get("wr_ayms_low",   0.12)
+        if recent_air_yards_share >= ayms_elite:
+            multiplier *= 1.15
+            flags.append("ayms_elite")
+            reasoning.append(
+                f"Air yards share {recent_air_yards_share:.1%} — dominates team's deep passing game."
+            )
+        elif recent_air_yards_share >= ayms_solid:
+            multiplier *= 1.07
+        elif recent_air_yards_share < ayms_low:
+            multiplier *= 0.92
+            reasoning.append(
+                f"Low air yards share ({recent_air_yards_share:.1%}) — limited role in downfield passing."
+            )
+
+    # --- Touch dominance (RB) ---
+    # True top-6 RBs are the clear workhorse; committee backs rarely crack top-6.
+    if position == "RB" and recent_touch_share is not None:
+        rb_workhorse = dom_cfg.get("rb_workhorse_touch_share", 0.28)
+        rb_featured  = dom_cfg.get("rb_featured_touch_share",  0.20)
+        rb_committee = dom_cfg.get("rb_committee_touch_share", 0.14)
+        if recent_touch_share >= rb_workhorse:
+            multiplier *= 1.15
+            flags.append("workhorse")
+            reasoning.append(
+                f"Touch share {recent_touch_share:.1%} — workhorse usage in team's offense."
+            )
+        elif recent_touch_share >= rb_featured:
+            multiplier *= 1.06
+        elif recent_touch_share < rb_committee:
+            multiplier *= 0.88
+            flags.append("committee_back")
+            reasoning.append(
+                f"Low touch share ({recent_touch_share:.1%}) — likely in a committee role."
+            )
+
+    # --- Per-carry efficiency (RB) ---
+    if position == "RB" and recent_ypc is not None:
+        ypc_elite = dom_cfg.get("rb_ypc_elite", 5.0)
+        ypc_solid = dom_cfg.get("rb_ypc_solid", 4.5)
+        ypc_poor  = dom_cfg.get("rb_ypc_poor",  3.5)
+        if recent_ypc >= ypc_elite:
+            multiplier *= 1.08
+            reasoning.append(f"Elite YPC ({recent_ypc:.1f}) — efficient runner even in heavy workload.")
+        elif recent_ypc >= ypc_solid:
+            multiplier *= 1.04
+        elif recent_ypc < ypc_poor:
+            multiplier *= 0.95
+
+    # --- Yards-per-target efficiency (WR only) ---
+    # High Y/TGT for TE reflects deep-threat role, not fantasy production dominance —
+    # elite TEs (Kelce, Andrews) have moderate Y/TGT from heavy slot usage.
+    if position == "WR" and recent_ypt is not None:
+        ypt_elite = dom_cfg.get("wr_ypt_elite", 10.0)
+        ypt_solid = dom_cfg.get("wr_ypt_solid",  8.5)
+        ypt_poor  = dom_cfg.get("wr_ypt_poor",   6.0)
+        if recent_ypt >= ypt_elite:
+            multiplier *= 1.08
+            reasoning.append(f"Elite yards-per-target ({recent_ypt:.1f}) — high-value receiver.")
+        elif recent_ypt >= ypt_solid:
+            multiplier *= 1.04
+        elif recent_ypt < ypt_poor:
+            multiplier *= 0.95
+
+    raw_score = base_score * multiplier
+
+    # --- QB starter-volume filter ---
+    # Only applied when we have 2+ seasons so legitimate new starters aren't penalized.
+    if position == "QB" and avg_games_per_season is not None and num_seasons >= 2:
+        qb_min_games = ctx_cfg.get("qb_starter_min_avg_games", 12)
+        qb_max_penalty = ctx_cfg.get("qb_starter_penalty", 0.25)
+        if avg_games_per_season < qb_min_games:
+            severity = 1.0 - (avg_games_per_season / qb_min_games)
+            qb_penalty = qb_max_penalty * severity
+            flags.append("fringe_starter")
+            reasoning.append(
+                f"Avg {avg_games_per_season:.1f} games/season — fringe starter risk; "
+                "projection assumes starting role not guaranteed."
+            )
+            raw_score *= (1.0 - qb_penalty)
 
     return ModuleScore(
         player_id=player_id, season_evaluated=upcoming_season,

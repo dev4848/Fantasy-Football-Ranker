@@ -98,7 +98,8 @@ def score_trend(
     """
     trend_cfg = config.get("trend", {})
     rising_threshold = trend_cfg.get("rising_threshold_stdev", 1.0)
-    boom_bust_threshold = trend_cfg.get("boom_bust_cv_threshold", 0.45)
+    declining_threshold = trend_cfg.get("declining_threshold_stdev", 1.5)
+    boom_bust_threshold = trend_cfg.get("boom_bust_cv_threshold", 0.55)
     td_reg_threshold = trend_cfg.get("td_regression_stdev_threshold", 1.5)
     min_games = config["history"].get("min_games_threshold", 12)
 
@@ -169,11 +170,11 @@ def score_trend(
                 f"significantly above career mean ({wmean:.1f}), suggesting "
                 "upward momentum."
             )
-        elif last_per_game < wmean - rising_threshold * std:
+        elif last_per_game < wmean - declining_threshold * std:
             flags.append("declining")
             reasoning.append(
                 f"Last season's output ({last_per_game:.1f} pts/game) was "
-                f"below career mean ({wmean:.1f}) — possible decline or role change."
+                f"well below career mean ({wmean:.1f}) — sustained decline or role change."
             )
 
     # --- Boom-bust flag ---

@@ -91,10 +91,10 @@ scoring:
 # Historical data window
 # ------------------------------------------------------------
 history:
-  lookback_years: 4          # how many seasons to analyze (max 5)
+  lookback_years: 3          # how many seasons to analyze (max 5)
   # Recency weights — must have 'lookback_years' entries.
   # First entry = most recent season. Will be auto-normalized.
-  recency_weights: [1.0, 0.70, 0.45, 0.25]
+  recency_weights: [1.0, 0.70, 0.45]
 
   # Minimum games played for a season to receive full weight.
   # Seasons below this threshold get a games-played discount:
@@ -120,6 +120,28 @@ module_weights:
   schedule:         0.10    # strength of schedule in upcoming season
   context:          0.10    # O-line grade, team win proj, QB situation
   consistency:      0.10    # reliability — floor/ceiling spread
+
+# ------------------------------------------------------------
+# Declining + injury risk discount
+# Applied as a multiplier on the normalized fantasy_points score
+# for players who BOTH have declining trajectory AND high injury risk.
+# These players' historical production is a poor predictor of future
+# output — the combination of decline and fragility usually means
+# they won't recapture their peak. 20% reduction is conservative.
+# ------------------------------------------------------------
+# ------------------------------------------------------------
+# Limited history discount
+# Players with fewer seasons of data get a discount on their
+# fantasy_points normalized score — prevents one breakout season
+# from launching a player into the top tier without track record.
+# Applied multiplicatively on top of any other fp modifiers.
+# ------------------------------------------------------------
+limited_history_discount:
+  one_season_discount: 0.12   # 1 season of data → -12% on fp score
+  two_season_discount: 0.06   # 2 seasons of data → -6% on fp score
+
+declining_injury_discount:
+  fp_reduction: 0.35    # reduce normalized fantasy_points score by 35% for declining + injury_risk_high
 
 # ------------------------------------------------------------
 # Injury risk module settings
@@ -149,8 +171,12 @@ trend:
   # Standard deviations above career mean for "rising" flag
   rising_threshold_stdev: 1.0
 
-  # Coefficient of variation (std/mean) cutoff for boom-bust flag
-  boom_bust_cv_threshold: 0.45
+  # Standard deviations BELOW career mean to fire "declining" flag.
+  # Kept higher than rising_threshold so mild one-year dips don't trigger decline.
+  declining_threshold_stdev: 1.5
+
+  # Coefficient of variation (std/mean) cutoff for boom-bust flag (season-level)
+  boom_bust_cv_threshold: 0.55
 
   # TD regression flag: seasons where TD rate is this many stdevs
   # above career rate get flagged with td_regression_risk (soft warning)
@@ -180,6 +206,11 @@ context:
   # who has < 1 year of NFL starts
   qb_change_penalty: -0.08         # -8% composite score modifier
 
+  # QB starter-volume filter: QBs who don't average starter-level games
+  # per season get penalized — catches backup QBs with inflated projections.
+  qb_starter_min_avg_games: 12     # threshold: < 12 avg games/season = fringe starter
+  qb_starter_penalty: 0.25         # max penalty applied to context score
+
   # Team win projection source
   team_projection_source: "vegas"  # options: "vegas", "fivethirtyeight"
 
@@ -197,6 +228,47 @@ positions:
   exclude: [K, DST]
 
 # ------------------------------------------------------------
+# Age-based decline curve
+# Applied as a multiplier on the context module score.
+# Position-specific thresholds reflect real NFL aging curves.
+# ------------------------------------------------------------
+age_curve:
+  # WR/TE: meaningful decline typically starts 30-31, steeper at 32+
+  wr_mild_age:     30
+  wr_moderate_age: 32
+  # RB: fastest-aging skill position, cliff at 28-30
+  rb_mild_age:     28
+  rb_moderate_age: 30
+  # QB: slowest aging, elite QBs often peak 32-36
+  qb_mild_age:     36
+  qb_moderate_age: 39
+  # Penalty magnitudes (fraction of context score removed)
+  mild_penalty:     0.08   # -8%  at mild age threshold
+  moderate_penalty: 0.18   # -18% at moderate age threshold
+  heavy_penalty:    0.30   # -30% at heavy (moderate+2) threshold
+
+# ------------------------------------------------------------
+# Target share floor (WR / TE only)
+# WRs/TEs below meaningful target share in their last season
+# get a context score penalty — catches players who lost their role.
+# ------------------------------------------------------------
+target_share:
+  wr_meaningful_share: 0.12   # WR below 12% share last season gets dampened
+  te_meaningful_share: 0.10   # TE below 10% share last season gets dampened
+  low_share_penalty:   0.20   # max 20% reduction (scales linearly from 0 to floor)
+
+# ------------------------------------------------------------
+# Snap / route participation (WR only, applied in context module)
+# Snap% is a proxy for route participation and role clarity.
+# ------------------------------------------------------------
+snap_participation:
+  wr_starter_snap_pct:  0.75   # 75%+ snaps = clear starter role → small boost
+  wr_backup_snap_pct:   0.50   # below 50% snaps = limited role → penalty
+  role_expanding_delta: 0.08   # snap% up 8+ pts YoY = expanding role → boost
+  starter_bonus:  0.08         # boost applied to context score for clear starters
+  backup_penalty: 0.12         # penalty for limited snap share
+
+# ------------------------------------------------------------
 # Minimum data requirements
 # A player must meet these thresholds to appear in rankings.
 # Players below threshold are excluded with a note.
@@ -204,3 +276,35 @@ positions:
 eligibility:
   min_seasons_with_data: 1     # rookies excluded until v2
   min_career_games: 8          # must have played at least 8 career games
+  min_games_last_season: 6     # must have played 6+ games in most recent season
+                               # filters retired/cut players — lower if a known
+                               # injury-return player is being excluded unfairly
+
+# ------------------------------------------------------------
+# Offensive dominance signals (added to context module)
+# These signals improve top-6 accuracy by distinguishing true
+# workhorse/WR1 players from volume-similar but lesser options.
+# All are applied as multipliers on the context module score.
+# ------------------------------------------------------------
+dominance_signals:
+  # WR air yards market share — separates WR1 from WR2
+  # Elite WRs (Tyreek, Davante) typically own 25%+ of team air yards.
+  wr_ayms_elite: 0.25    # 25%+ → +15% context boost
+  wr_ayms_solid: 0.18    # 18–25% → +7% boost
+  wr_ayms_low:   0.12    # <12% → -8% penalty
+
+  # RB touch share (carries + targets / team total)
+  # True workhorse RBs (CMC, Henry) own 28%+ of team touches.
+  rb_workhorse_touch_share: 0.28   # 28%+ → +15% boost
+  rb_featured_touch_share:  0.20   # 20–28% → +6% boost
+  rb_committee_touch_share: 0.14   # <14% → -12% penalty
+
+  # RB yards per carry thresholds
+  rb_ypc_elite: 5.0    # 5.0+ → +8% boost
+  rb_ypc_solid: 4.5    # 4.5–5.0 → +4% boost
+  rb_ypc_poor:  3.5    # <3.5 → -5% penalty
+
+  # WR/TE yards per target thresholds
+  wr_ypt_elite: 10.0   # 10.0+ → +8% boost
+  wr_ypt_solid:  8.5   # 8.5–10.0 → +4% boost
+  wr_ypt_poor:   6.0   # <6.0 → -5% penalty

@@ -107,27 +107,59 @@ def generate_reasoning(
 
     Strategy:
       - Lead with the top 2 contributing modules (highest weighted_contribution).
-      - Surface all flags with context-appropriate sentences.
+      - Surface remaining flags whose source module wasn't already in the top 2
+        (prevents semantic duplicates where module reasoning and flag sentence
+        say the same thing in different words).
       - Close with a confidence note if history is limited.
 
     The goal is 3–6 concise bullets that a drafter can read in 10 seconds.
     """
     bullets: list[str] = []
+    seen: set[str] = set()   # exact-match dedup guard
+
+    def _add(text: str) -> None:
+        if text and text not in seen:
+            bullets.append(text)
+            seen.add(text)
 
     # Sort modules by their weighted contribution (highest first)
     ranked_modules = sorted(
         module_scores, key=lambda m: m.weighted_contribution, reverse=True
     )
 
-    # Top 2 modules
+    # Top 2 modules — add first reasoning bullet from each
+    top_module_names: set[str] = set()
     for ms in ranked_modules[:2]:
         if ms.reasoning:
-            bullets.append(ms.reasoning[0])   # first bullet from each module
+            _add(ms.reasoning[0])
+            top_module_names.add(ms.module_name)
 
     # Collect all flags across modules
     all_flags = {flag for ms in module_scores for flag in ms.flags}
 
-    # Flag-specific sentences
+    # Flag → source module mapping — used to skip flags whose module is already
+    # represented in the top-2 (avoids saying the same thing twice in different words)
+    flag_source = {
+        "rising":             "trend",
+        "declining":          "trend",
+        "boom_bust":          "trend",
+        "td_regression_risk": "trend",
+        "injury_risk_high":   "injury_risk",
+        "aggression_high":    "injury_risk",
+        "bad_team":           "context",
+        "qb_uncertainty":     "context",
+        "age_decline":        "context",
+        "low_target_share":   "context",
+        "role_expanding":     "context",
+        "limited_role":       "context",
+        "fringe_starter":     "context",
+        "ayms_elite":         "context",
+        "workhorse":          "context",
+        "committee_back":     "context",
+        "favorable_schedule": "schedule",
+        "tough_schedule":     "schedule",
+    }
+
     flag_sentences = {
         "rising":
             "Trajectory is trending upward — last season significantly above career mean.",
@@ -142,7 +174,7 @@ def generate_reasoning(
         "td_regression_risk":
             "Last season's TD rate was unusually high; some regression expected.",
         "limited_history":
-            f"Limited data ({player.years_in_league} NFL season(s)) — projection confidence is moderate.",
+            f"Limited data ({player.years_in_league + 1} NFL season(s)) — projection confidence is moderate.",
         "qb_uncertainty":
             "Team has a new or unproven starting QB — pass-catcher upside may be capped.",
         "bad_team":
@@ -151,16 +183,37 @@ def generate_reasoning(
             "Favorable schedule — faces soft defenses at key position in projected weeks.",
         "tough_schedule":
             "Difficult schedule — faces tough defenses at their position most weeks.",
+        "age_decline":
+            f"Age-related decline risk — {player.position} production often drops at this stage.",
+        "low_target_share":
+            "Target share was low last season — role may have diminished in the offense.",
+        "role_expanding":
+            "Snap share trending up — expanding role suggests more opportunity ahead.",
+        "limited_role":
+            "Below-average snap share last season — role in offense is limited.",
+        "fringe_starter":
+            "Averaged below starter-level games per season — not a guaranteed Week 1 starter.",
+        "ayms_elite":
+            "Dominant air yards share — the clear WR1 target in the passing game.",
+        "workhorse":
+            "Workhorse usage — leads team in combined carries and targets.",
+        "committee_back":
+            "Committee role — low touch share indicates shared backfield workload.",
     }
 
-    for flag in sorted(all_flags):   # sorted for deterministic output
-        if flag in flag_sentences and flag_sentences[flag] not in bullets:
-            bullets.append(flag_sentences[flag])
+    for flag in sorted(all_flags):
+        if flag not in flag_sentences:
+            continue
+        # Skip if this flag's source module already contributed a top-2 bullet —
+        # that bullet already communicates the signal; repeating it wastes a slot.
+        if flag_source.get(flag) in top_module_names:
+            continue
+        _add(flag_sentences[flag])
 
     # Confidence note for limited-history players
     if player.limited_history and "limited_history" not in all_flags:
-        bullets.append(
-            f"Only {player.years_in_league} season(s) of NFL data — "
+        _add(
+            f"Only {player.years_in_league + 1} season(s) of NFL data — "
             "weights normalized to available history."
         )
 
@@ -186,9 +239,21 @@ def rank_all_players(
     """
     raw_weights = config["module_weights"]
     weights = normalize_weights(raw_weights)
+    pos_weight_overrides = config.get("position_module_weights", {})
+
+    # Pre-compute per-position weight vectors (merges base + overrides, renormalized)
+    pos_weights: dict[str, dict[str, float]] = {}
+    all_positions = list({p["position"] for p in players})
+    for pos in all_positions:
+        override = pos_weight_overrides.get(pos, {})
+        if override:
+            merged = {**raw_weights, **override}
+            pos_weights[pos] = normalize_weights(merged)
+        else:
+            pos_weights[pos] = weights
 
     module_names = list(raw_weights.keys())
-    positions_in_use = list({p["position"] for p in players})
+    positions_in_use = all_positions
 
     # Step 1 — Normalize per module × per position
     # {module_name: {player_id: normalized_score}}
@@ -208,20 +273,74 @@ def rank_all_players(
         normalized[module_name] = {}
         for pos in positions_in_use:
             norm = normalize_scores(module_name, raw_by_pos[pos])
+            # injury_risk raw_score is a risk level (higher = worse).
+            # Invert so low risk players get high contribution.
+            if module_name == "injury_risk":
+                norm = {pid: 1.0 - v for pid, v in norm.items()}
             normalized[module_name].update(norm)
 
     # Step 2 — Apply weights, build module_scores list per player
     player_composites: dict[str, float] = {}
     final_module_scores: dict[str, list[ModuleScore]] = {}
 
+    # Pre-compute per-player flag sets (needed for declining+injury discount)
+    player_all_flags: dict[str, set[str]] = {
+        player["player_id"]: {
+            f for ms in position_module_scores.get(player["player_id"], [])
+            for f in ms.flags
+        }
+        for player in players
+    }
+
+    declining_injury_cfg  = config.get("declining_injury_discount", {})
+    fp_reduction          = declining_injury_cfg.get("fp_reduction", 0.0)
+
+    lh_cfg                = config.get("limited_history_discount", {})
+    lh_one_season         = lh_cfg.get("one_season_discount",   0.12)
+    lh_two_season         = lh_cfg.get("two_season_discount",   0.06)
+
+    # Build per-player season count from their module_inputs seasons list
+    player_season_counts: dict[str, int] = {
+        player["player_id"]: len(position_module_scores.get(player["player_id"], []))
+        for player in players
+    }
+    # Season count comes from the seasons list passed to score_fantasy_points —
+    # use the fantasy_points module's raw reasoning to infer it, or store it
+    # directly from the module score count. We track it via ingestion metadata.
+    # Simpler: read num_seasons stored on the player dict (set below from seasons list).
+
     for player in players:
         pid = player["player_id"]
+        pos = player["position"]
+        player_weights = pos_weights.get(pos, weights)
         updated_modules = []
         composite = 0.0
 
+        all_flags   = player_all_flags.get(pid, set())
+        num_seasons = player.get("num_seasons", 3)   # passed through from ingestion
+
+        # Declining + injury discount
+        fp_modifier = 1.0
+        if (fp_reduction > 0
+                and "declining" in all_flags
+                and "injury_risk_high" in all_flags):
+            fp_modifier = 1.0 - fp_reduction
+
+        # Limited history discount — fewer seasons = less confidence in the avg.
+        # Applied to RB and TE only: both positions show clear sophomore regression.
+        # WR development curves are more linear (year-1 WR breakouts sustain), so
+        # applying this to WR incorrectly penalises legitimately elite young receivers.
+        if pos in ("RB", "TE"):
+            if num_seasons == 1:
+                fp_modifier *= (1.0 - lh_one_season)
+            elif num_seasons == 2:
+                fp_modifier *= (1.0 - lh_two_season)
+
         for ms in position_module_scores.get(pid, []):
             norm_score = normalized.get(ms.module_name, {}).get(pid, 0.0)
-            w = weights.get(ms.module_name, 0.0)
+            if ms.module_name == "fantasy_points":
+                norm_score *= fp_modifier
+            w = player_weights.get(ms.module_name, 0.0)
             contribution = norm_score * w
             composite += contribution
 
